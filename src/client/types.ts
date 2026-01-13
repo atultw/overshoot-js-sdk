@@ -43,6 +43,7 @@ export type StreamCreateResponse = {
   lease?: {
     ttl_seconds: number;
   };
+  turn_servers?: RTCIceServer[];
 };
 
 export type StreamInferenceResult = {

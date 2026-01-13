@@ -19,13 +19,14 @@ const DEFAULTS = {
   FALLBACK_FPS: 30,
   ICE_SERVERS: [
     {
-      urls: ["turn:34.63.114.235:3478"],
-      username: "demo",
-      credential: "demo-password",
+      urls: "turn:34.63.114.235:3478",
+      username: "1768325310:634a30f8-ae52-4a15-9d3f-a56b725dacd9",
+      credential: "H5IEJ1IJrOUzQkVG9lXr8Z4EJGU=",
     },
   ] as RTCIceServer[],
 } as const;
 
+console.log("defaults", DEFAULTS);
 /**
  * Validation constraints
  */
@@ -449,9 +450,40 @@ export class RealtimeVision {
         throw new Error("No video track available");
       }
 
-      // Set up WebRTC peer connection
-      const iceServers = this.config.iceServers ?? DEFAULTS.ICE_SERVERS;
-      this.peerConnection = new RTCPeerConnection({ iceServers });
+      // Set up WebRTC peer connection with initial ICE servers
+      // Use user-provided or default to public STUN servers
+      const initialIceServers = this.config.iceServers ?? DEFAULTS.ICE_SERVERS;
+      console.log(
+        "🔧 Creating peer connection with initial ICE servers:",
+        initialIceServers,
+      );
+      this.peerConnection = new RTCPeerConnection({
+        iceServers: initialIceServers,
+      });
+
+      // Add ICE candidate logging
+      this.peerConnection.onicecandidate = (event) => {
+        if (event.candidate) {
+          console.log("🧊 ICE candidate:", {
+            type: event.candidate.type,
+            protocol: event.candidate.protocol,
+            candidate: event.candidate.candidate,
+          });
+          if (event.candidate.candidate.includes("relay")) {
+            console.log("✅ TURN relay candidate generated!");
+          }
+        } else {
+          console.log("🧊 ICE gathering complete");
+        }
+      };
+
+      // Add ICE connection state logging
+      this.peerConnection.oniceconnectionstatechange = () => {
+        console.log(
+          "🔌 ICE connection state:",
+          this.peerConnection?.iceConnectionState,
+        );
+      };
 
       this.peerConnection.addTrack(videoTrack, this.mediaStream);
 
@@ -478,7 +510,40 @@ export class RealtimeVision {
         },
       });
 
-      // Set remote description
+      console.log("📡 Backend response received:", {
+        stream_id: response.stream_id,
+        has_turn_servers: !!response.turn_servers,
+        turn_count: response.turn_servers?.length || 0,
+      });
+
+      // Update ICE servers with TURN credentials from backend
+      // if (response.turn_servers && response.turn_servers.length > 0) {
+      //   console.log("🔥 TURN CREDENTIALS RECEIVED FROM BACKEND:");
+      //   console.log("   Username:", response.turn_servers[0].username);
+      //   console.log(
+      //     "   Credential:",
+      //     response.turn_servers[0].credential?.substring(0, 10) + "...",
+      //   );
+      //   console.log("   URLs:", response.turn_servers[0].urls);
+      //
+      //   console.log("🔄 Updating peer connection with new ICE servers...");
+      //   this.peerConnection.setConfiguration({
+      //     iceServers: response.turn_servers,
+      //   });
+      //   console.log("✅ ICE servers updated successfully");
+      //
+      //   // Restart ICE to gather new candidates with TURN servers
+      //   console.log("🔄 Restarting ICE to gather TURN candidates...");
+      //   await this.peerConnection.setLocalDescription(
+      //     await this.peerConnection.createOffer({ iceRestart: true }),
+      //   );
+      //   console.log("✅ ICE restart initiated");
+      // } else {
+      //   console.warn("⚠️  NO TURN SERVERS in backend response!");
+      // }
+      //
+      // Set remote description (ICE gathering starts now with TURN servers)
+
       await this.peerConnection.setRemoteDescription(response.webrtc);
 
       this.streamId = response.stream_id;
