@@ -20,8 +20,8 @@ const DEFAULTS = {
   ICE_SERVERS: [
     {
       urls: "turn:34.63.114.235:3478",
-      username: "1768325310:634a30f8-ae52-4a15-9d3f-a56b725dacd9",
-      credential: "H5IEJ1IJrOUzQkVG9lXr8Z4EJGU=",
+      username: "1769538895:c66a907c-61f4-4ec2-93a6-9d6b932776bb",
+      credential: "Fu9L4CwyYZvsOLc+23psVAo3i/Y=",
     },
   ] as RTCIceServer[],
 } as const;
