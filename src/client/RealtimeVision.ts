@@ -175,6 +175,12 @@ export class RealtimeVision {
   private keepaliveInterval: number | null = null;
   private videoElement: HTMLVideoElement | null = null;
 
+  // For PNG stream support
+  private canvasElement: HTMLCanvasElement | null = null;
+  private canvasContext: CanvasRenderingContext2D | null = null;
+  private currentFrame: HTMLImageElement | null = null;
+  private frameRenderInterval: number | null = null;
+
   private isRunning = false;
 
   constructor(config: RealtimeVisionConfig) {
@@ -217,8 +223,26 @@ export class RealtimeVision {
         if (!(config.source.file instanceof File)) {
           throw new ValidationError("video source must provide a File object");
         }
+      } else if (config.source.type === "png-stream") {
+        // Validate optional dimensions
+        if (config.source.width !== undefined && config.source.width <= 0) {
+          throw new ValidationError("png-stream width must be positive");
+        }
+        if (config.source.height !== undefined && config.source.height <= 0) {
+          throw new ValidationError("png-stream height must be positive");
+        }
+        if (config.source.targetFps !== undefined) {
+          const fps = config.source.targetFps;
+          if (fps < CONSTRAINTS.FPS.min || fps > CONSTRAINTS.FPS.max) {
+            throw new ValidationError(
+              `targetFps must be between ${CONSTRAINTS.FPS.min} and ${CONSTRAINTS.FPS.max}`,
+            );
+          }
+        }
       } else {
-        throw new ValidationError('source.type must be "camera" or "video"');
+        throw new ValidationError(
+          'source.type must be "camera", "video", or "png-stream"',
+        );
       }
     }
 
@@ -330,9 +354,102 @@ export class RealtimeVision {
         this.videoElement = video;
         return stream;
 
+      case "png-stream":
+        return this.createPngStreamMediaStream(source);
+
       default:
         throw new Error(`Unknown source type: ${(source as any).type}`);
     }
+  }
+
+  /**
+   * Create a MediaStream from PNG frames pushed via pushFrame()
+   */
+  private createPngStreamMediaStream(source: {
+    type: "png-stream";
+    width?: number;
+    height?: number;
+    targetFps?: number;
+  }): MediaStream {
+    // Set up canvas
+    this.canvasElement = document.createElement("canvas");
+    this.canvasElement.width = source.width ?? 1280;
+    this.canvasElement.height = source.height ?? 720;
+
+    this.canvasContext = this.canvasElement.getContext("2d", {
+      alpha: false,
+      desynchronized: true, // Optimize for animation
+    });
+
+    if (!this.canvasContext) {
+      throw new Error("Failed to create canvas 2D context");
+    }
+
+    // Fill with black initially
+    this.canvasContext.fillStyle = "black";
+    this.canvasContext.fillRect(
+      0,
+      0,
+      this.canvasElement.width,
+      this.canvasElement.height,
+    );
+
+    this.logger.debug("Canvas created:", {
+      width: this.canvasElement.width,
+      height: this.canvasElement.height,
+    });
+
+    // Capture stream from canvas
+    const targetFps = source.targetFps ?? 30;
+    const stream = this.canvasElement.captureStream(targetFps);
+
+    if (!stream) {
+      throw new Error("Failed to capture stream from canvas");
+    }
+
+    const videoTracks = stream.getVideoTracks();
+    if (videoTracks.length === 0) {
+      throw new Error("Canvas stream has no video tracks");
+    }
+
+    this.logger.debug("Canvas stream created with target FPS:", targetFps);
+
+    // Start continuous rendering loop
+    this.startFrameRenderLoop();
+
+    return stream;
+  }
+
+  /**
+   * Start the rendering loop that continuously draws the current frame
+   */
+  private startFrameRenderLoop(): void {
+    const renderFrame = () => {
+      if (!this.isRunning || !this.canvasContext || !this.canvasElement) {
+        return;
+      }
+
+      // Draw the current frame if available
+      if (this.currentFrame && this.currentFrame.complete) {
+        try {
+          this.canvasContext.drawImage(
+            this.currentFrame,
+            0,
+            0,
+            this.canvasElement.width,
+            this.canvasElement.height,
+          );
+        } catch (error) {
+          this.logger.warn("Failed to draw frame:", error);
+        }
+      }
+
+      // Continue loop
+      this.frameRenderInterval = window.requestAnimationFrame(renderFrame);
+    };
+
+    this.logger.debug("Starting frame render loop");
+    renderFrame();
   }
 
   /**
@@ -367,7 +484,7 @@ export class RealtimeVision {
       return fps;
     }
 
-    // For video file sources, try to get FPS from video element
+    // For video file sources, use fallback FPS
     if (source.type === "video" && this.videoElement) {
       await new Promise<void>((resolve, reject) => {
         if (this.videoElement!.readyState >= 1) {
@@ -379,9 +496,15 @@ export class RealtimeVision {
         }
       });
 
-      // For video files, use fallback FPS or user-specified config
       this.logger.debug("Using fallback FPS for video file");
       return DEFAULTS.FALLBACK_FPS;
+    }
+
+    // For PNG stream, use the target FPS from config
+    if (source.type === "png-stream") {
+      const fps = source.targetFps ?? DEFAULTS.FALLBACK_FPS;
+      this.logger.debug("Using PNG stream target FPS:", fps);
+      return fps;
     }
 
     return DEFAULTS.FALLBACK_FPS;
@@ -702,6 +825,68 @@ export class RealtimeVision {
     return this.isRunning;
   }
 
+  /**
+   * Push a new PNG frame to the stream (for png-stream source type only)
+   * Accepts: Blob, File, or data URL string
+   */
+  async pushFrame(frameData: Blob | File | string): Promise<void> {
+    const source = this.getSource();
+
+    if (source.type !== "png-stream") {
+      throw new Error(
+        "pushFrame() can only be used with png-stream source type",
+      );
+    }
+
+    if (!this.isRunning) {
+      throw new Error("Stream is not running. Call start() first.");
+    }
+
+    try {
+      // Create image element
+      const img = new Image();
+
+      // Convert to URL
+      const imageUrl =
+        typeof frameData === "string" ? frameData : URL.createObjectURL(frameData);
+
+      // Load the image
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => {
+          reject(new Error("Frame loading timeout after 5 seconds"));
+        }, 5000);
+
+        img.onload = () => {
+          clearTimeout(timeout);
+          resolve();
+        };
+
+        img.onerror = (e) => {
+          clearTimeout(timeout);
+          reject(new Error(`Failed to load frame: ${e}`));
+        };
+
+        img.src = imageUrl;
+      });
+
+      // Clean up old frame
+      if (this.currentFrame) {
+        const oldSrc = this.currentFrame.src;
+        if (oldSrc.startsWith("blob:")) {
+          URL.revokeObjectURL(oldSrc);
+        }
+      }
+
+      // Update current frame
+      this.currentFrame = img;
+
+      this.logger.debug("Frame pushed successfully");
+    } catch (error) {
+      this.logger.error("Error pushing frame:", error);
+      throw error;
+    }
+  }
+
   private async cleanup(): Promise<void> {
     this.logger.debug("Cleaning up resources");
 
@@ -731,6 +916,27 @@ export class RealtimeVision {
       this.videoElement.remove();
       this.videoElement = null;
     }
+
+    // Clean up PNG stream resources
+    if (this.frameRenderInterval !== null) {
+      window.cancelAnimationFrame(this.frameRenderInterval);
+      this.frameRenderInterval = null;
+    }
+
+    if (this.currentFrame) {
+      const src = this.currentFrame.src;
+      if (src.startsWith("blob:")) {
+        URL.revokeObjectURL(src);
+      }
+      this.currentFrame = null;
+    }
+
+    if (this.canvasElement) {
+      this.canvasElement.remove();
+      this.canvasElement = null;
+    }
+
+    this.canvasContext = null;
 
     this.streamId = null;
     this.logger.debug("Cleanup complete");
