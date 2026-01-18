@@ -1,6 +1,7 @@
 export type StreamSource =
   | { type: "camera"; cameraFacing: "user" | "environment" }
-  | { type: "video"; file: File };
+  | { type: "video"; file: File }
+  | { type: "png-stream"; width?: number; height?: number; targetFps?: number };
 
 export type WebRtcOffer = {
   type: "offer";
